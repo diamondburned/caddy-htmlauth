@@ -1,0 +1,33 @@
+{
+	admin off
+	order htmlauth before basicauth
+}
+
+(user_resource) {
+	handle_path /{args.0}* {
+		htmlauth * {
+			template   /home/diamond/Scripts/caddy-htmlauth/logintmpl.html
+			login_path /login
+	
+			basicauth bcrypt {
+				# Password: 123
+				{args.0} JDJhJDE0JHhBdy5JSXVlLy41UVpOdVJPT3ZhVU9NcWVjV2taMkxIQlZkdG1OQzQ3bC54bHdHdWdxZklD
+			}
+		}
+
+		respond * "Hello, {args.0}!"
+	}
+}
+
+http://127.0.0.1:29475 {
+	import user_resource user1
+	import user_resource diamond
+
+	# multiauth {
+	# 	template authtmpl.html
+	# 	redirect /{username}
+	# 	users user1 diamond
+	# }
+
+	respond "Hello, please go to /diamond or /user1."
+}
