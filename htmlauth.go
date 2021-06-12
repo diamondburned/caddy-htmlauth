@@ -140,6 +140,8 @@ func (auth *HTMLAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			return caddyhttp.Error(http.StatusMethodNotAllowed, nil)
 		}
 	}
+
+	// Get the base path for stage 1 or 3.
 	basePath := basePath(r, oldURL(r).Path)
 
 	// Stage 1: check if the user is already authenticated. Authentication using
@@ -195,7 +197,8 @@ func (auth *HTMLAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 }
 
 func basePath(r *http.Request, old string) string {
-	return strings.TrimSuffix(old, path.Clean(r.URL.Path))
+	// Clean both to not include trailing slashes and those tidbits.
+	return strings.TrimSuffix(path.Clean(old), path.Clean(r.URL.Path))
 }
 
 func oldURL(r *http.Request) *url.URL {
