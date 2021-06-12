@@ -166,7 +166,7 @@ func (auth *HTMLAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 	}
 
 	// Stage 2: try to see if the user is trying to do basic auth.
-	if r.Header.Get("Authentication") != "" {
+	if r.Header.Get("Authorization") != "" {
 		user, ok, err := auth.BasicAuth.Authenticate(w, r)
 		if err != nil {
 			return err
