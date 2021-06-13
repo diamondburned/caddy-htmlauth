@@ -1,12 +1,13 @@
 {
 	admin off
-	order htmlauth before basicauth
+	order htmlauth  before basicauth
+	order multiauth after  htmlauth
 }
 
 (user_resource) {
-	handle_path /{args.0}* {
+	handle_path /resource/{args.0}* {
 		htmlauth * {
-			template   /home/diamond/Scripts/caddy-htmlauth/logintmpl.html
+			template   /home/diamond/Scripts/caddy-htmlauth/example/logintmpl.html
 			login_path /login
 	
 			basicauth bcrypt {
@@ -23,11 +24,8 @@ http://127.0.0.1:29475 {
 	import user_resource user1
 	import user_resource diamond
 
-	# multiauth {
-	# 	template authtmpl.html
-	# 	redirect /{username}
-	# 	users user1 diamond
-	# }
-
-	respond "Hello, please go to /diamond or /user1."
+	multiauth / {
+		template /home/diamond/Scripts/caddy-htmlauth/example/logintmpl.html
+		redirect /resource/{username}/hello
+	}
 }

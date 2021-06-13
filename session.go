@@ -13,7 +13,10 @@ import (
 	"github.com/caddyserver/caddy/v2"
 )
 
-const sessionCookieName = "session"
+const (
+	sessionCookieName  = "htmlauth_session"
+	usernameCookieName = "htmlauth_username"
+)
 
 type session struct {
 	mutex    sync.Mutex
@@ -65,6 +68,17 @@ func sessionSetReplacer(r *http.Request, username string, expiry time.Time) {
 	if !expiry.IsZero() {
 		repl.Set("http.auth.user.session", "yes")
 		repl.Set("http.auth.user.expires", expiry.Format(time.RFC3339))
+	}
+}
+
+func usernameCookie(username string, expiry time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name:     usernameCookieName,
+		Value:    username,
+		Expires:  expiry,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
 	}
 }
 

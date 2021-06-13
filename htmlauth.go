@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -16,7 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/caddyauth"
-	"github.com/caddyserver/caddy/v2/modules/caddyhttp/templates"
+	"github.com/diamondburned/caddy-htmlauth/internal/jank"
 )
 
 func init() {
@@ -31,6 +30,7 @@ func init() {
 func parseHTMLAuthDirective(parser httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	auth := HTMLAuth{
 		SessionAge: caddy.Duration(7 * 24 * time.Hour), // 1 week
+		Hosts:      jank.CaddyfileHosts(parser),
 	}
 
 	for parser.Next() {
@@ -83,6 +83,7 @@ type HTMLAuth struct {
 	Template   string                  `json:"template"`
 	LoginPath  string                  `json:"login_path"`
 	BasicAuth  caddyauth.HTTPBasicAuth `json:"basic_auth"`
+	Hosts      []string                `json:"hosts"`
 
 	sessions      sync.Map // token -> *session
 	fakePassword  []byte   // I hate unexported fields.
@@ -108,10 +109,8 @@ func (auth *HTMLAuth) Provision(ctx caddy.Context) error {
 		return err
 	}
 
-	// if supported, generate a fake password we can compare against if needed
-	if hasher, ok := auth.BasicAuth.Hash.(caddyauth.Hasher); ok {
-		auth.fakePassword, _ = hasher.Hash([]byte("antitiming"), []byte("fakesalt"))
-	}
+	// Get the fake password to guard against timing attacks.
+	auth.fakePassword = jank.BasicAuthFakePw(auth.BasicAuth)
 
 	auth.accountHashes = make(map[string]accountHash, len(auth.BasicAuth.Accounts))
 	for username, account := range auth.BasicAuth.Accounts {
@@ -125,6 +124,12 @@ func (auth *HTMLAuth) Provision(ctx caddy.Context) error {
 		}
 	}
 
+	registerHTMLAuth(auth)
+	return nil
+}
+
+func (auth *HTMLAuth) Cleanup() error {
+	deregisterHTMLAuth(auth)
 	return nil
 }
 
@@ -133,7 +138,7 @@ func (auth *HTMLAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 	if strings.HasPrefix(r.URL.Path, auth.LoginPath) {
 		switch r.Method {
 		case "GET":
-			return auth.renderLogin(w, r)
+			return renderLogin(w, r, auth.Template)
 		case "POST":
 			return auth.loginPOST(w, r)
 		default:
@@ -157,8 +162,9 @@ func (auth *HTMLAuth) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			if ok {
 				// Set the http.auth.user placeholders.
 				sessionSetReplacer(r, ses.username, expiry)
-				// Update the cookie.
+				// Update the cookies.
 				http.SetCookie(w, sessionCookie(basePath, cookie.Value, expiry))
+				http.SetCookie(w, usernameCookie(ses.username, expiry))
 
 				return next.ServeHTTP(w, r)
 			}
@@ -207,33 +213,31 @@ func oldURL(r *http.Request) *url.URL {
 	return &v
 }
 
-// redirectWithQuery redirects the client to the same path with added URL
-// values.
-func redirectWithQuery(w http.ResponseWriter, r *http.Request, add url.Values) {
-	old := oldURL(r)
-	qry := old.Query()
-	for k, v := range add {
-		qry[k] = v
-	}
-	old.RawQuery = qry.Encode()
-	http.Redirect(w, r, old.RequestURI(), http.StatusSeeOther)
-}
-
 func (auth *HTMLAuth) loginPOST(w http.ResponseWriter, r *http.Request) error {
 	if err := r.ParseForm(); err != nil {
 		redirectWithQuery(w, r, url.Values{"err": {err.Error()}})
 		return nil
 	}
 
+	redirectTo, cookie, err := auth.tryLogin(r)
+	if err != nil {
+		return err
+	}
+
+	http.SetCookie(w, cookie)
+	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+	return nil
+}
+
+// tryLogin returns the redirect URI for the caller to write.
+func (auth *HTMLAuth) tryLogin(r *http.Request) (string, *http.Cookie, error) {
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 	if username == "" {
-		redirectWithQuery(w, r, url.Values{"err": {"Username cannot be empty."}})
-		return nil
+		return uriWithQuery(r, url.Values{"err": {"username cannot be empty"}}), nil, nil
 	}
 	if password == "" {
-		redirectWithQuery(w, r, url.Values{"err": {"Password cannot be empty."}})
-		return nil
+		return uriWithQuery(r, url.Values{"err": {"password cannot be empty"}}), nil, nil
 	}
 
 	account, ok := auth.accountHashes[username]
@@ -246,14 +250,13 @@ func (auth *HTMLAuth) loginPOST(w http.ResponseWriter, r *http.Request) error {
 	correct, err := auth.BasicAuth.Hash.Compare(account.password, []byte(password), account.salt)
 	if err != nil {
 		log.Println("htmlauth: hash compare error:", err)
-		return caddyhttp.Error(http.StatusInternalServerError, nil)
+		return "", nil, caddyhttp.Error(http.StatusInternalServerError, nil)
 	}
 
 	// Incorrect password; redirect back to the login page.
 	if !correct {
 		// Login POST is in the same path, so we can just redirect to a GET.
-		redirectWithQuery(w, r, url.Values{"err": {"Incorrect username or password."}})
-		return nil
+		return uriWithQuery(r, url.Values{"err": {"incorrect username or password"}}), nil, nil
 	}
 
 	// Authentication pass; store the session.
@@ -279,46 +282,13 @@ func (auth *HTMLAuth) loginPOST(w http.ResponseWriter, r *http.Request) error {
 	sessionSetReplacer(r, username, expires)
 
 	basePath := basePath(r, oldURL(r).Path)
-	http.SetCookie(w, sessionCookie(basePath, token, expires))
+	cookie := sessionCookie(basePath, token, expires)
 
 	// See if we have the origin query. If we do, then redirect the user back
 	// there. Otherwise, redirect to the base path.
 	if origin := r.FormValue("origin"); origin != "" {
-		http.Redirect(w, r, origin, http.StatusSeeOther)
-		return nil
+		return origin, cookie, nil
 	}
 
-	http.Redirect(w, r, basePath, http.StatusSeeOther)
-	return nil
-}
-
-func (auth *HTMLAuth) renderLogin(w http.ResponseWriter, r *http.Request) error {
-	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
-
-	root, ok := repl.GetString("http.vars.root")
-	if !ok || !strings.HasPrefix(root, "/") {
-		root = "/" // OS root
-	}
-
-	templateCtx := templates.TemplateContext{
-		Root:       http.Dir(root),
-		Req:        r,
-		RespHeader: templates.WrappedHeader{Header: w.Header()},
-	}
-
-	var err error
-
-	tmpl := templateCtx.NewTemplate(filepath.Base(auth.Template))
-	tmpl, err = tmpl.ParseFiles(auth.Template)
-	if err != nil {
-		return caddyhttp.Error(http.StatusInternalServerError, err)
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	if err := tmpl.Execute(w, templateCtx); err != nil {
-		return caddyhttp.Error(http.StatusInternalServerError, err)
-	}
-
-	return nil
+	return basePath, cookie, nil
 }
